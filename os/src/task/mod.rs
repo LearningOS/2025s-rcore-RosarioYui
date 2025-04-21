@@ -14,7 +14,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM, MAX_SYSCALL};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
@@ -45,6 +45,8 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    /// use for syscall counter
+    syscall_cnt:[usize;MAX_SYSCALL]
 }
 
 lazy_static! {
@@ -65,6 +67,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_cnt: [0;MAX_SYSCALL]
                 })
             },
         }
@@ -135,6 +138,29 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn inc_syscall(&self, id: usize){
+        let mut inner = self.inner.exclusive_access();
+        if id >= MAX_SYSCALL {
+            panic!("syscall id out of range!");
+        } else {
+            inner.syscall_cnt[id] += 1;
+        }
+    }
+
+    fn get_syscall(&self, id:usize) -> usize{
+        let inner = self.inner.exclusive_access();
+        if id >= MAX_SYSCALL {
+            panic!("syscall id out of range!");
+        } else{
+            inner.syscall_cnt[id]
+        }
+    }
+
+    fn clear_syscall(&self){
+        let mut inner = self.inner.exclusive_access();
+        inner.syscall_cnt.iter_mut().for_each(|c|*c = 0);
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +194,19 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// increment the syscall counter by 1
+pub fn inc_syscall(id:usize){
+    TASK_MANAGER.inc_syscall(id);
+}
+
+/// get the syscall counter with specified id
+pub fn get_syscall(id:usize) -> usize{
+    TASK_MANAGER.get_syscall(id)
+}
+
+/// clear current syscall counter
+pub fn clear_syscall(){
+    TASK_MANAGER.clear_syscall();
 }
