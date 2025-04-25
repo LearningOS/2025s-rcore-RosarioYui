@@ -21,8 +21,9 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
+use crate::config::MAX_SYSCALL_ID;
 pub use context::TaskContext;
+use crate::mm::{MapPermission, PTEFlags, PhysAddr, VirtAddr};
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -46,6 +47,7 @@ struct TaskManagerInner {
     tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
     current_task: usize,
+    syscall_cnt:[usize;MAX_SYSCALL_ID]
 }
 
 lazy_static! {
@@ -64,6 +66,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_cnt: [0;MAX_SYSCALL_ID]
                 })
             },
         }
@@ -153,6 +156,103 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// get &mut T by virtual addr in current memory set
+    pub fn get_mut_ref<T>(&self, vaddr:VirtAddr) -> Option<&'static mut T> {
+        let bit38 = vaddr.0 >> 38 & 0x1;
+        let top_bits = vaddr.0 >> 39;
+        let inner = self.inner.exclusive_access();
+        if (bit38 ==0 && top_bits ==0) || (bit38 == 1&& !top_bits == 0){
+            if let Some(pte) = inner.tasks[inner.current_task]
+                .memory_set
+                .translate(vaddr.floor()){
+                if pte.flags().contains(PTEFlags::W | PTEFlags::R){
+                    let mut phy_addr:usize = PhysAddr::from(pte.ppn()).into();
+                    phy_addr += vaddr.page_offset();
+                    unsafe {
+                        (phy_addr as *mut T).as_mut()
+                    }
+                } else{
+                    None
+                }
+            } else{
+                None
+            }
+        } else{
+            None
+        }
+    }
+
+    /// get &T by virtual addr in current memory set
+    pub fn get_ref<T>(&self, vaddr:VirtAddr) -> Option<&'static T> {
+        let bit38 = vaddr.0 >> 38 & 0x1;
+        let top_bits = vaddr.0 >> 39;
+        let inner = self.inner.exclusive_access();
+        if (bit38 == 0 && top_bits != 0) || (bit38 == 1 && top_bits != (1 << 25) - 1) {
+            return None;
+        }
+        let pte = inner.tasks[inner.current_task]
+                .memory_set
+                .translate(vaddr.floor())?;
+
+        if pte.flags().contains(PTEFlags::R) {
+            let mut phy_addr: usize = PhysAddr::from(pte.ppn()).into();
+            phy_addr += vaddr.page_offset();
+            unsafe {
+                (phy_addr as *mut T).as_ref()
+            }
+        } else{
+            None
+        }
+    }
+
+    /// Increment syscall counter with specify id
+    fn inc_syscall(&self, id: usize){
+        let mut inner = self.inner.exclusive_access();
+        if id >= MAX_SYSCALL_ID {
+            panic!("syscall id out of range!");
+        } else {
+            inner.syscall_cnt[id] += 1;
+        }
+    }
+
+    /// Return syscall counter with specify id
+    fn get_syscall_cnt(&self, id:usize) -> usize{
+        let inner = self.inner.exclusive_access();
+        if id >= MAX_SYSCALL_ID {
+            panic!("syscall id out of range!");
+        } else{
+            inner.syscall_cnt[id]
+        }
+    }
+
+    /// Clear syscall counter by zero
+    fn clear_syscall(&self){
+        let mut inner = self.inner.exclusive_access();
+        inner.syscall_cnt.iter_mut().for_each(|c|*c = 0);
+    }
+
+    /// map a framed area to current memory set
+    fn map_frame(&self, va: VirtAddr, ve: VirtAddr, perm:MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.map_frame(
+            va, ve, perm
+        )
+    }
+
+    fn unmap_frame(&self, va: VirtAddr, ve: VirtAddr) -> bool{
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.unmap_frame(
+            va, ve
+        )
+    }
+
+    fn debug_vaddr(&self, va: VirtAddr) {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].memory_set.translate_debug(va.floor());
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +301,45 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// get &mut T by virtual addr in current memory set
+pub fn get_mut_ref<T>(vaddr:VirtAddr)-> Option<&'static mut T> {
+    TASK_MANAGER.get_mut_ref(vaddr)
+}
+
+/// get &T by virtual addr in current memory set
+pub fn get_ref<T>(vaddr:VirtAddr)-> Option<&'static T> {
+    TASK_MANAGER.get_ref(vaddr)
+}
+
+/// increment the syscall counter by 1
+pub fn inc_syscall(id:usize){
+    TASK_MANAGER.inc_syscall(id);
+}
+
+/// get the syscall counter with specified id
+pub fn get_syscall_cnt(id:usize) -> usize{
+    TASK_MANAGER.get_syscall_cnt(id)
+}
+
+/// clear current syscall counter
+pub fn clear_syscall(){
+    TASK_MANAGER.clear_syscall();
+}
+
+/// map a framed area to current memory set
+pub fn map_frame(va: VirtAddr, ve: VirtAddr, perm:MapPermission) -> bool{
+    TASK_MANAGER.map_frame(va, ve, perm)
+}
+
+/// map a or some framed area to current memory set
+pub fn unmap_frame(va: VirtAddr, ve: VirtAddr) -> bool{
+    TASK_MANAGER.unmap_frame(va, ve)
+}
+
+/// show a virtual addr translation path used for debug
+#[allow(unused)]
+pub fn debug_vaddr(vaddr: VirtAddr){
+    TASK_MANAGER.debug_vaddr(vaddr);
 }

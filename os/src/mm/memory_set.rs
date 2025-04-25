@@ -233,6 +233,11 @@ impl MemorySet {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
     }
+
+    /// Translate a virtual page number to a page table entry and show translation path
+    pub fn translate_debug(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+        self.page_table.translate_debug(vpn)
+    }
     /// shrink the area to new_end
     #[allow(unused)]
     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
@@ -261,6 +266,85 @@ impl MemorySet {
         } else {
             false
         }
+    }
+
+    /// map a framed area to memory set
+    pub fn map_frame(&mut self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> bool {
+        let mut map_area = MapArea::new(start_va, end_va, MapType::Framed, permission);
+        for vpn in map_area.vpn_range {
+            if self.areas.iter().find(|area| area.data_frames.contains_key(&vpn)).is_some() {
+                return false;
+            }
+
+            if !map_area.map_one_frame(&mut self.page_table, vpn){
+                return false
+            }
+        }
+        self.areas.push(map_area);
+        true
+    }
+
+    /// unmap some framed area to memory set
+    pub fn unmap_frame(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool{
+        let mut start_vpn:VirtPageNum = start_va.floor();
+        let end_vpn:VirtPageNum = end_va.ceil();
+        while start_vpn < end_vpn {
+            if let Some(area_idx) = self.areas
+                .iter()
+                .position(|area|
+                    area.vpn_range.get_start() <= start_vpn
+                        && start_vpn < area.vpn_range.get_end()){
+
+                let area_start_vpn = self.areas[area_idx].vpn_range.get_start();
+                let area_end_vpn = self.areas[area_idx].vpn_range.get_end();
+                let unmap_end = end_vpn.min(area_end_vpn);
+
+                for vpn in usize::from(start_vpn)..usize::from(unmap_end) {
+                    self.areas[area_idx].unmap_one(&mut self.page_table, vpn.into());
+                }
+
+                match (start_vpn == area_start_vpn, unmap_end == area_end_vpn) {
+                    (true, true) =>{
+                        self.areas.remove(area_idx);
+                    } ,
+                    (true, false) =>{
+                        self.areas[area_idx].vpn_range = VPNRange::new(end_vpn, area_end_vpn);
+                    },
+                    (false, true) =>{
+                        self.areas[area_idx].vpn_range = VPNRange::new(area_start_vpn, start_vpn);
+                    }
+                    (false, false) => {
+                        let map_type = self.areas[area_idx].map_type;
+                        let map_perm = self.areas[area_idx].map_perm;
+
+                        let mut area_left = MapArea::new(
+                            area_start_vpn.into(), start_vpn.into(), map_type, map_perm
+                        );
+                        let mut area_right = MapArea::new(
+                            end_vpn.into(), area_end_vpn.into(), map_type, map_perm
+                        );
+
+                        for area in [&mut area_left, &mut area_right]{
+                            for vpn in area.vpn_range{
+                                if let Some(frame) = self.areas[area_idx].data_frames.remove(&vpn) {
+                                    area.data_frames.insert(vpn, frame);
+                                }
+                            }
+                        }
+                        self.areas.remove(area_idx);
+                        self.areas.push(area_left);
+                        self.areas.push(area_right);
+                    }
+                }
+
+
+
+                start_vpn = unmap_end;
+            } else{
+                return false;
+            }
+        }
+        true
     }
 }
 /// map area structure, controls a contiguous piece of virtual memory
@@ -301,6 +385,20 @@ impl MapArea {
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
+    }
+
+    pub fn map_one_frame(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> bool{
+        let ppn: PhysPageNum;
+
+        if let Some(frame) = frame_alloc(){
+            ppn = frame.ppn;
+            self.data_frames.insert(vpn, frame);
+            let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+            page_table.map(vpn, ppn, pte_flags);
+            true
+        } else{
+            false
+        }
     }
     #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
