@@ -8,13 +8,21 @@ use bitflags::*;
 bitflags! {
     /// page table entry flags
     pub struct PTEFlags: u8 {
+        /// Valid
         const V = 1 << 0;
+        /// Readable
         const R = 1 << 1;
+        /// Writable
         const W = 1 << 2;
+        /// eXecutable
         const X = 1 << 3;
+        /// User
         const U = 1 << 4;
+        /// Global
         const G = 1 << 5;
+        /// Accessed
         const A = 1 << 6;
+        /// Dirty
         const D = 1 << 7;
     }
 }
@@ -157,6 +165,27 @@ impl PageTable {
     /// get the token from the page table
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
+    }
+
+    /// get the page table entry from the virtual page number and show translation path
+    pub fn translate_debug(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        let mut result: Option<&mut PageTableEntry> = None;
+        debug!("{:?}", vpn);
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            debug!("{} pte:{:#x}, ppn:{:#x}", "=>".repeat(i+1), pte.bits, pte.ppn().0);
+            if i == 2 {
+                result = Some(pte);
+                break;
+            }
+            if !pte.is_valid() {
+                return None;
+            }
+            ppn = pte.ppn();
+        }
+        result.map(|pte| *pte)
     }
 }
 

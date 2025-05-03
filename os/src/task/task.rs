@@ -2,12 +2,13 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission, PTEFlags, PhysAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::config::MAX_SYSCALL_ID;
 
 /// Task control block structure
 ///
@@ -68,6 +69,9 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// counter for syscall
+    syscall_cnt:[usize;MAX_SYSCALL_ID]
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +122,7 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_cnt: [0; MAX_SYSCALL_ID],
                 })
             },
         };
@@ -191,6 +196,7 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_cnt: parent_inner.syscall_cnt,
                 })
             },
         });
@@ -235,6 +241,103 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// get &mut T by virtual addr in current memory set
+    pub fn get_mut_ref<T>(&self, vaddr:VirtAddr) -> Option<&'static mut T> {
+        let bit38 = vaddr.0 >> 38 & 0x1;
+        let top_bits = vaddr.0 >> 39;
+        let inner = self.inner.exclusive_access();
+        if (bit38 ==0 && top_bits ==0) || (bit38 == 1&& !top_bits == 0){
+            if let Some(pte) = inner
+                .memory_set
+                .translate(vaddr.floor()){
+                if pte.flags().contains(PTEFlags::W | PTEFlags::R){
+                    let mut phy_addr:usize = PhysAddr::from(pte.ppn()).into();
+                    phy_addr += vaddr.page_offset();
+                    unsafe {
+                        (phy_addr as *mut T).as_mut()
+                    }
+                } else{
+                    None
+                }
+            } else{
+                None
+            }
+        } else{
+            None
+        }
+    }
+
+    /// get &T by virtual addr in current memory set
+    pub fn get_ref<T>(&self, vaddr:VirtAddr) -> Option<&'static T> {
+        let bit38 = vaddr.0 >> 38 & 0x1;
+        let top_bits = vaddr.0 >> 39;
+        let inner = self.inner.exclusive_access();
+        if (bit38 == 0 && top_bits != 0) || (bit38 == 1 && top_bits != (1 << 25) - 1) {
+            return None;
+        }
+        let pte = inner
+                .memory_set
+                .translate(vaddr.floor())?;
+
+        if pte.flags().contains(PTEFlags::R) {
+            let mut phy_addr: usize = PhysAddr::from(pte.ppn()).into();
+            phy_addr += vaddr.page_offset();
+            unsafe {
+                (phy_addr as *mut T).as_ref()
+            }
+        } else{
+            None
+        }
+    }
+
+    /// Increment syscall counter with specify id
+    pub fn inc_syscall(&self, id: usize){
+        let mut inner = self.inner.exclusive_access();
+        if id >= MAX_SYSCALL_ID {
+            panic!("syscall id out of range!");
+        } else {
+            inner.syscall_cnt[id] += 1;
+        }
+    }
+
+    /// Return syscall counter with specify id
+    pub fn get_syscall_cnt(&self, id:usize) -> usize{
+        let inner = self.inner.exclusive_access();
+        if id >= MAX_SYSCALL_ID {
+            panic!("syscall id out of range!");
+        } else{
+            inner.syscall_cnt[id]
+        }
+    }
+
+    /// Clear syscall counter by zero
+    pub fn clear_syscall(&self){
+        let mut inner = self.inner.exclusive_access();
+        inner.syscall_cnt.iter_mut().for_each(|c|*c = 0);
+    }
+
+    /// map a framed area in current memory set
+    pub fn map_frame(&self, va: VirtAddr, ve: VirtAddr, perm:MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        inner.memory_set.map_frame(
+            va, ve, perm
+        )
+    }
+
+    /// unmap a framed area in current memory set
+    pub fn unmap_frame(&self, va: VirtAddr, ve: VirtAddr) -> bool{
+        let mut inner = self.inner.exclusive_access();
+        inner.memory_set.unmap_frame(
+            va, ve
+        )
+    }
+
+    /// show vaddr transition path for debug
+    pub fn debug_vaddr(&self, va: VirtAddr) {
+        let inner = self.inner.exclusive_access();
+        inner.memory_set.translate_debug(va.floor());
     }
 }
 
