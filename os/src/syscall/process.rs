@@ -11,6 +11,7 @@ use crate::{
     },
     timer::get_time_us
 };
+use crate::task::TaskControlBlock;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -173,12 +174,22 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let current_task = current_task().unwrap();
+    let mut inner  = current_task.inner_exclusive_access();
+    let path = translated_str(current_user_token(), path);
+    if let Some(elf_data) = get_app_data_by_name(path.as_str()){
+        let new_task = Arc::new(TaskControlBlock::new(elf_data));
+        inner.children.push(new_task.clone());
+        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&current_task));
+        new_task.pid.0 as _
+    } else{
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
