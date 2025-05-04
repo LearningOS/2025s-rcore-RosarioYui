@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{TRAP_CONTEXT_BASE, BIG_STRIDE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission, PTEFlags, PhysAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -71,7 +71,13 @@ pub struct TaskControlBlockInner {
     pub program_brk: usize,
 
     /// counter for syscall
-    syscall_cnt:[usize;MAX_SYSCALL_ID]
+    syscall_cnt:[usize;MAX_SYSCALL_ID],
+
+    /// current running time
+    stride: usize,
+
+    /// priority
+    pass: usize
 }
 
 impl TaskControlBlockInner {
@@ -89,6 +95,9 @@ impl TaskControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
+    pub fn get_stride(&self) -> usize {
+        self.stride
+    }
 }
 
 impl TaskControlBlock {
@@ -97,7 +106,9 @@ impl TaskControlBlock {
     /// At present, it is only used for the creation of initproc
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
+        trace!("debug-1");
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        trace!("debug-2");
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -123,6 +134,8 @@ impl TaskControlBlock {
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                     syscall_cnt: [0; MAX_SYSCALL_ID],
+                    stride: 0,
+                    pass: BIG_STRIDE / 16 // default priority is 16
                 })
             },
         };
@@ -136,6 +149,24 @@ impl TaskControlBlock {
             trap_handler as usize,
         );
         task_control_block
+    }
+
+    /// set schedule priority
+    pub fn set_prio(&self, priority:isize) -> isize{
+        let mut inner = self.inner_exclusive_access();
+        if priority >= 2 {
+            // overflow
+            inner.pass = BIG_STRIDE / priority as usize;
+            priority as isize
+        } else{
+            -1
+        }
+    }
+
+    /// update current running time
+    pub fn update_stride(&self){
+        let mut inner = self.inner_exclusive_access();
+        inner.stride += inner.pass;
     }
 
     /// Load a new elf to replace the original application address space and start execution
@@ -197,6 +228,8 @@ impl TaskControlBlock {
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
                     syscall_cnt: parent_inner.syscall_cnt,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16
                 })
             },
         });

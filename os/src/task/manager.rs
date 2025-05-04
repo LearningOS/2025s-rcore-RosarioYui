@@ -24,6 +24,14 @@ impl TaskManager {
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.ready_queue.pop_front()
+        // if let Some(&next_task) = self.ready_queue.iter().min_by(|&current, &other|{
+        //     current.inner_exclusive_access().get_stride().cmp(&other.inner_exclusive_access().get_stride())
+        // }){
+        //     next_task.update_stride();
+        //     Some(next_task)
+        // } else{
+        //     None
+        // }
     }
 }
 

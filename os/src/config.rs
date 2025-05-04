@@ -23,3 +23,6 @@ pub const CLOCK_FREQ: usize = 12500000;
 pub const MEMORY_END: usize = 0x88000000;
 /// maximum of  syscall id
 pub const MAX_SYSCALL_ID:usize = 0x200;
+
+/// used for stride schedule
+pub const BIG_STRIDE:usize = 0x200;
