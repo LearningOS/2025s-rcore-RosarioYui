@@ -1,0 +1,583 @@
+diff --git a/os/src/config.rs b/os/src/config.rs
+index 5761cdd..f706aef 100644
+--- a/os/src/config.rs
++++ b/os/src/config.rs
+@@ -23,3 +23,5 @@ pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
+ pub const CLOCK_FREQ: usize = 12500000;
+ /// the physical memory end
+ pub const MEMORY_END: usize = 0x88000000;
++/// maximum of  syscall id
++pub const MAX_SYSCALL_ID:usize = 0x200;
+diff --git a/os/src/mm/memory_set.rs b/os/src/mm/memory_set.rs
+index 7a7b7ea..8693161 100644
+--- a/os/src/mm/memory_set.rs
++++ b/os/src/mm/memory_set.rs
+@@ -233,6 +233,11 @@ impl MemorySet {
+     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+         self.page_table.translate(vpn)
+     }
++
++    /// Translate a virtual page number to a page table entry and show translation path
++    pub fn translate_debug(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
++        self.page_table.translate_debug(vpn)
++    }
+     /// shrink the area to new_end
+     #[allow(unused)]
+     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
+@@ -262,6 +267,85 @@ impl MemorySet {
+             false
+         }
+     }
++
++    /// map a framed area to memory set
++    pub fn map_frame(&mut self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> bool {
++        let mut map_area = MapArea::new(start_va, end_va, MapType::Framed, permission);
++        for vpn in map_area.vpn_range {
++            if self.areas.iter().find(|area| area.data_frames.contains_key(&vpn)).is_some() {
++                return false;
++            }
++
++            if !map_area.map_one_frame(&mut self.page_table, vpn){
++                return false
++            }
++        }
++        self.areas.push(map_area);
++        true
++    }
++
++    /// unmap some framed area to memory set
++    pub fn unmap_frame(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool{
++        let mut start_vpn:VirtPageNum = start_va.floor();
++        let end_vpn:VirtPageNum = end_va.ceil();
++        while start_vpn < end_vpn {
++            if let Some(area_idx) = self.areas
++                .iter()
++                .position(|area|
++                    area.vpn_range.get_start() <= start_vpn
++                        && start_vpn < area.vpn_range.get_end()){
++
++                let area_start_vpn = self.areas[area_idx].vpn_range.get_start();
++                let area_end_vpn = self.areas[area_idx].vpn_range.get_end();
++                let unmap_end = end_vpn.min(area_end_vpn);
++
++                for vpn in usize::from(start_vpn)..usize::from(unmap_end) {
++                    self.areas[area_idx].unmap_one(&mut self.page_table, vpn.into());
++                }
++
++                match (start_vpn == area_start_vpn, unmap_end == area_end_vpn) {
++                    (true, true) =>{
++                        self.areas.remove(area_idx);
++                    } ,
++                    (true, false) =>{
++                        self.areas[area_idx].vpn_range = VPNRange::new(end_vpn, area_end_vpn);
++                    },
++                    (false, true) =>{
++                        self.areas[area_idx].vpn_range = VPNRange::new(area_start_vpn, start_vpn);
++                    }
++                    (false, false) => {
++                        let map_type = self.areas[area_idx].map_type;
++                        let map_perm = self.areas[area_idx].map_perm;
++
++                        let mut area_left = MapArea::new(
++                            area_start_vpn.into(), start_vpn.into(), map_type, map_perm
++                        );
++                        let mut area_right = MapArea::new(
++                            end_vpn.into(), area_end_vpn.into(), map_type, map_perm
++                        );
++
++                        for area in [&mut area_left, &mut area_right]{
++                            for vpn in area.vpn_range{
++                                if let Some(frame) = self.areas[area_idx].data_frames.remove(&vpn) {
++                                    area.data_frames.insert(vpn, frame);
++                                }
++                            }
++                        }
++                        self.areas.remove(area_idx);
++                        self.areas.push(area_left);
++                        self.areas.push(area_right);
++                    }
++                }
++
++
++
++                start_vpn = unmap_end;
++            } else{
++                return false;
++            }
++        }
++        true
++    }
+ }
+ /// map area structure, controls a contiguous piece of virtual memory
+ pub struct MapArea {
+@@ -302,6 +386,20 @@ impl MapArea {
+         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+         page_table.map(vpn, ppn, pte_flags);
+     }
++
++    pub fn map_one_frame(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> bool{
++        let ppn: PhysPageNum;
++
++        if let Some(frame) = frame_alloc(){
++            ppn = frame.ppn;
++            self.data_frames.insert(vpn, frame);
++            let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
++            page_table.map(vpn, ppn, pte_flags);
++            true
++        } else{
++            false
++        }
++    }
+     #[allow(unused)]
+     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+         if self.map_type == MapType::Framed {
+diff --git a/os/src/mm/page_table.rs b/os/src/mm/page_table.rs
+index afa9d29..e85644d 100644
+--- a/os/src/mm/page_table.rs
++++ b/os/src/mm/page_table.rs
+@@ -155,6 +155,27 @@ impl PageTable {
+     pub fn token(&self) -> usize {
+         8usize << 60 | self.root_ppn.0
+     }
++
++    /// get the page table entry from the virtual page number and show translation path
++    pub fn translate_debug(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
++        let idxs = vpn.indexes();
++        let mut ppn = self.root_ppn;
++        let mut result: Option<&mut PageTableEntry> = None;
++        debug!("{:?}", vpn);
++        for (i, idx) in idxs.iter().enumerate() {
++            let pte = &mut ppn.get_pte_array()[*idx];
++            debug!("{} pte:{:#x}, ppn:{:#x}", "=>".repeat(i+1), pte.bits, pte.ppn().0);
++            if i == 2 {
++                result = Some(pte);
++                break;
++            }
++            if !pte.is_valid() {
++                return None;
++            }
++            ppn = pte.ppn();
++        }
++        result.map(|pte| *pte)
++    }
+ }
+ 
+ /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
+@@ -179,3 +200,5 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
+     }
+     v
+ }
++
++
+diff --git a/os/src/syscall/mod.rs b/os/src/syscall/mod.rs
+index 91d7ba3..36c7b7a 100644
+--- a/os/src/syscall/mod.rs
++++ b/os/src/syscall/mod.rs
+@@ -30,12 +30,19 @@ mod process;
+ 
+ use fs::*;
+ use process::*;
++use crate::task::{inc_syscall, clear_syscall};
++
+ 
+ /// handle syscall exception with `syscall_id` and other arguments
+ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
++    inc_syscall(syscall_id);
++
+     match syscall_id {
+         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
+-        SYSCALL_EXIT => sys_exit(args[0] as i32),
++        SYSCALL_EXIT => {
++            clear_syscall();
++            sys_exit(args[0] as i32)
++        },
+         SYSCALL_YIELD => sys_yield(),
+         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
+         SYSCALL_TRACE => sys_trace(args[0], args[1], args[2]),
+diff --git a/os/src/syscall/process.rs b/os/src/syscall/process.rs
+index ec4285b..d33fb0c 100644
+--- a/os/src/syscall/process.rs
++++ b/os/src/syscall/process.rs
+@@ -1,5 +1,9 @@
+ //! Process management syscalls
+-use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next};
++
++use crate::mm::{MapPermission, VirtAddr};
++use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,
++                  get_ref, get_mut_ref, get_syscall_cnt, map_frame, unmap_frame};
++use crate::timer::get_time_us;
+ 
+ #[repr(C)]
+ #[derive(Debug)]
+@@ -25,28 +29,77 @@ pub fn sys_yield() -> isize {
+ /// YOUR JOB: get time with second and microsecond
+ /// HINT: You might reimplement it with virtual memory management.
+ /// HINT: What if [`TimeVal`] is splitted by two pages ?
+-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
++pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+     trace!("kernel: sys_get_time");
+-    -1
++    let us = get_time_us();
++
++    if let Some(p) = get_mut_ref(VirtAddr::from(ts as usize)) {
++        *p = TimeVal{
++            sec:us / 1_000_000,
++            usec:us % 1_000_000,
++        };
++        0
++    } else{
++        -1
++    }
+ }
+ 
+ /// TODO: Finish sys_trace to pass testcases
+ /// HINT: You might reimplement it with virtual memory management.
+-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
++pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
+     trace!("kernel: sys_trace");
+-    -1
++    match trace_request {
++        0 => {
++            if let Some(p) = get_ref::<i8>(VirtAddr(id)) {
++                *p as _
++            } else {
++                -1
++            }
++        },
++        1 => {
++            if let Some(p) = get_mut_ref(id.into()) {
++                *p = data as u8;
++                0
++            } else {
++                -1
++            }
++        },
++        2 => {
++            get_syscall_cnt(id) as _
++        },
++        _ => -1
++    }
+ }
+ 
+ // YOUR JOB: Implement mmap.
+-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
++pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+     trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
+-    -1
++    let vaddr_start = VirtAddr::from(start);
++
++    let vpn_end = VirtAddr::from(start + len).ceil();
++    if !vaddr_start.aligned() ||
++        port & !0x7 !=0 ||
++        port & 0x7 == 0{
++        -1
++    } else{
++        if map_frame(vaddr_start, vpn_end.into(),
++                     MapPermission::from_bits((port << 1) as u8 | 1<<4).unwrap()){
++            0
++        } else{
++            -1
++        }
++    }
++
+ }
+ 
+ // YOUR JOB: Implement munmap.
+-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
++pub fn sys_munmap(start: usize, len: usize) -> isize {
+     trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
+-    -1
++    if unmap_frame(VirtAddr::from(start), VirtAddr::from(start + len)){
++        0
++    } else{
++        -1
++    }
+ }
+ /// change data segment size
+ pub fn sys_sbrk(size: i32) -> isize {
+diff --git a/os/src/task/mod.rs b/os/src/task/mod.rs
+index a745df8..4bf1b7f 100644
+--- a/os/src/task/mod.rs
++++ b/os/src/task/mod.rs
+@@ -21,8 +21,9 @@ use alloc::vec::Vec;
+ use lazy_static::*;
+ use switch::__switch;
+ pub use task::{TaskControlBlock, TaskStatus};
+-
++use crate::config::MAX_SYSCALL_ID;
+ pub use context::TaskContext;
++use crate::mm::{MapPermission, PTEFlags, PhysAddr, VirtAddr};
+ 
+ /// The task manager, where all the tasks are managed.
+ ///
+@@ -46,6 +47,7 @@ struct TaskManagerInner {
+     tasks: Vec<TaskControlBlock>,
+     /// id of current `Running` task
+     current_task: usize,
++    syscall_cnt:[usize;MAX_SYSCALL_ID]
+ }
+ 
+ lazy_static! {
+@@ -64,6 +66,7 @@ lazy_static! {
+                 UPSafeCell::new(TaskManagerInner {
+                     tasks,
+                     current_task: 0,
++                    syscall_cnt: [0;MAX_SYSCALL_ID]
+                 })
+             },
+         }
+@@ -153,6 +156,103 @@ impl TaskManager {
+             panic!("All applications completed!");
+         }
+     }
++
++    /// get &mut T by virtual addr in current memory set
++    pub fn get_mut_ref<T>(&self, vaddr:VirtAddr) -> Option<&'static mut T> {
++        let bit38 = vaddr.0 >> 38 & 0x1;
++        let top_bits = vaddr.0 >> 39;
++        let inner = self.inner.exclusive_access();
++        if (bit38 ==0 && top_bits ==0) || (bit38 == 1&& !top_bits == 0){
++            if let Some(pte) = inner.tasks[inner.current_task]
++                .memory_set
++                .translate(vaddr.floor()){
++                if pte.flags().contains(PTEFlags::W | PTEFlags::R){
++                    let mut phy_addr:usize = PhysAddr::from(pte.ppn()).into();
++                    phy_addr += vaddr.page_offset();
++                    unsafe {
++                        (phy_addr as *mut T).as_mut()
++                    }
++                } else{
++                    None
++                }
++            } else{
++                None
++            }
++        } else{
++            None
++        }
++    }
++
++    /// get &T by virtual addr in current memory set
++    pub fn get_ref<T>(&self, vaddr:VirtAddr) -> Option<&'static T> {
++        let bit38 = vaddr.0 >> 38 & 0x1;
++        let top_bits = vaddr.0 >> 39;
++        let inner = self.inner.exclusive_access();
++        if (bit38 == 0 && top_bits != 0) || (bit38 == 1 && top_bits != (1 << 25) - 1) {
++            return None;
++        }
++        let pte = inner.tasks[inner.current_task]
++                .memory_set
++                .translate(vaddr.floor())?;
++
++        if pte.flags().contains(PTEFlags::R) {
++            let mut phy_addr: usize = PhysAddr::from(pte.ppn()).into();
++            phy_addr += vaddr.page_offset();
++            unsafe {
++                (phy_addr as *mut T).as_ref()
++            }
++        } else{
++            None
++        }
++    }
++
++    /// Increment syscall counter with specify id
++    fn inc_syscall(&self, id: usize){
++        let mut inner = self.inner.exclusive_access();
++        if id >= MAX_SYSCALL_ID {
++            panic!("syscall id out of range!");
++        } else {
++            inner.syscall_cnt[id] += 1;
++        }
++    }
++
++    /// Return syscall counter with specify id
++    fn get_syscall_cnt(&self, id:usize) -> usize{
++        let inner = self.inner.exclusive_access();
++        if id >= MAX_SYSCALL_ID {
++            panic!("syscall id out of range!");
++        } else{
++            inner.syscall_cnt[id]
++        }
++    }
++
++    /// Clear syscall counter by zero
++    fn clear_syscall(&self){
++        let mut inner = self.inner.exclusive_access();
++        inner.syscall_cnt.iter_mut().for_each(|c|*c = 0);
++    }
++
++    /// map a framed area to current memory set
++    fn map_frame(&self, va: VirtAddr, ve: VirtAddr, perm:MapPermission) -> bool {
++        let mut inner = self.inner.exclusive_access();
++        let current = inner.current_task;
++        inner.tasks[current].memory_set.map_frame(
++            va, ve, perm
++        )
++    }
++
++    fn unmap_frame(&self, va: VirtAddr, ve: VirtAddr) -> bool{
++        let mut inner = self.inner.exclusive_access();
++        let current = inner.current_task;
++        inner.tasks[current].memory_set.unmap_frame(
++            va, ve
++        )
++    }
++
++    fn debug_vaddr(&self, va: VirtAddr) {
++        let inner = self.inner.exclusive_access();
++        inner.tasks[inner.current_task].memory_set.translate_debug(va.floor());
++    }
+ }
+ 
+ /// Run the first task in task list.
+@@ -202,3 +302,44 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
+ pub fn change_program_brk(size: i32) -> Option<usize> {
+     TASK_MANAGER.change_current_program_brk(size)
+ }
++
++/// get &mut T by virtual addr in current memory set
++pub fn get_mut_ref<T>(vaddr:VirtAddr)-> Option<&'static mut T> {
++    TASK_MANAGER.get_mut_ref(vaddr)
++}
++
++/// get &T by virtual addr in current memory set
++pub fn get_ref<T>(vaddr:VirtAddr)-> Option<&'static T> {
++    TASK_MANAGER.get_ref(vaddr)
++}
++
++/// increment the syscall counter by 1
++pub fn inc_syscall(id:usize){
++    TASK_MANAGER.inc_syscall(id);
++}
++
++/// get the syscall counter with specified id
++pub fn get_syscall_cnt(id:usize) -> usize{
++    TASK_MANAGER.get_syscall_cnt(id)
++}
++
++/// clear current syscall counter
++pub fn clear_syscall(){
++    TASK_MANAGER.clear_syscall();
++}
++
++/// map a framed area to current memory set
++pub fn map_frame(va: VirtAddr, ve: VirtAddr, perm:MapPermission) -> bool{
++    TASK_MANAGER.map_frame(va, ve, perm)
++}
++
++/// map a or some framed area to current memory set
++pub fn unmap_frame(va: VirtAddr, ve: VirtAddr) -> bool{
++    TASK_MANAGER.unmap_frame(va, ve)
++}
++
++/// show a virtual addr translation path used for debug
++#[allow(unused)]
++pub fn debug_vaddr(vaddr: VirtAddr){
++    TASK_MANAGER.debug_vaddr(vaddr);
++}
+\ No newline at end of file
+diff --git a/os/src/trap/mod.rs b/os/src/trap/mod.rs
+index a024d9c..45f9a2a 100644
+--- a/os/src/trap/mod.rs
++++ b/os/src/trap/mod.rs
+@@ -17,7 +17,7 @@ mod context;
+ use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
+ use crate::syscall::syscall;
+ use crate::task::{
+-    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,
++    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next
+ };
+ use crate::timer::set_next_trigger;
+ use core::arch::{asm, global_asm};
+@@ -68,11 +68,20 @@ pub fn trap_handler() -> ! {
+             // get system call return value
+             cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
+         }
+-        Trap::Exception(Exception::StoreFault)
+-        | Trap::Exception(Exception::StorePageFault)
+-        | Trap::Exception(Exception::LoadFault)
+-        | Trap::Exception(Exception::LoadPageFault) => {
+-            println!("[kernel] PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
++        Trap::Exception(Exception::StoreFault) => {
++            println!("[kernel] StoreFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
++            exit_current_and_run_next();
++        }
++        Trap::Exception(Exception::StorePageFault) => {
++            println!("[kernel] StorePageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
++            exit_current_and_run_next();
++        }
++        Trap::Exception(Exception::LoadFault) => {
++            println!("[kernel] LoadFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
++            exit_current_and_run_next();
++        }
++        Trap::Exception(Exception::LoadPageFault) => {
++            println!("[kernel] LoadPageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
+             exit_current_and_run_next();
+         }
+         Trap::Exception(Exception::IllegalInstruction) => {
+diff --git a/reports/lab1.md b/reports/lab1.md
+new file mode 100644
+index 0000000..48cdce8
+--- /dev/null
++++ b/reports/lab1.md
+@@ -0,0 +1 @@
++placeholder
+diff --git a/reports/lab2.md b/reports/lab2.md
+new file mode 100644
+index 0000000..56d0833
+--- /dev/null
++++ b/reports/lab2.md
+@@ -0,0 +1,53 @@
++# 总结
++在这一章节是实现了sv39（三级页表）分页机制，支持了虚拟地址的概念。
++
++# 问答题
++## Q1
++53-28   |   27-19   |   18-10   |   9-8    |DAGUXWRV
++PPN[2]      PPN[1]      PPN[0]      RSW
++完整的sv39标志位包括:
++- V：表示该pte是否有效
++- R/W/X：可读/可写/可执行，当三位都为0时表示一个中间节点，否则该pte为叶节点
++- U：该页面用户态是否可访问，此外当设置了sstatus中的SUM位，则在S态访问U为1的页面时不会pagefault，否则会触发（SUM默认为0）
++- G：表示该页为全局映射（存在于所有地址空间中），如果中间节点的G位为1,则其下层的所有叶子节点也（必须）为global。如果没有把实际全局映射的页面标记为G，则会造成性能下降（但不会导致错误：TLB刷新时可以避免刷新标记为G的页，没有标记则只会浪费一些没有必要的TLB Miss），把非全局映射的页面标记为G，则会导致错误（没有及时刷新TLB）
++- A：仅叶子节点有效，表示该页最近被读/写/过（自从上次A位被清除后）
++- D：仅叶子节点有效，表示该页最近被写过（自动上次D位被清除后）
++## Q2
++### 1
++- 如果被访问页已经被page out交换出去了，访问时就会触发缺页异常
++- 或者延迟分配（COW...）
++### 2
++- scause：异常原因码
++- stval：指向触发缺页异常的虚拟地址
++- sepc：指向触发缺页异常的地址
++### 3
++- 节省一部分内存，例如程序执行到一半就退出了，不需要加载另一半
++- 加快程序加载速度
++### 4
++1个l0页表可表示512\*4k=2M
++1个l1页表可表示512\*2M=1G
++则10G需要1个l2页表，10个l1页表，5120个l0页表，大小为4k+10\*4k+5120\*4k=44k+20M
++### 5
++首先给定一个常量作为默认加载的页数，并使用一定的数据结构将待映射的虚拟地址保存起来
++之后在程序执行时，如果出现缺页异常，则检查访问的虚拟地址如果落在保存的数据结构中，则进行实际的申请和映射，处理后重新进行访存
++## 6
++- 当访问到一个叶子节点Valid时，rwx权限满足指定操作需求（还有U），由A和D进行判断，如果A为0或者操作为写且D为0，则可以认为是延迟分配
++-当访问到一个叶子节点invalid时，此时会触发pagefault，软件会进行一些判断是非法页还是已换出页
++## Q3
++### 1
++将根页表信息保存在内核线程结构体中，切换线程时，将当前根页表存入结构体而将目标线程根页表写入satp即完成切换
++### 2
++使用pte中的U-bit来控制访问权限，仅将地址空间中用户应用的部分设置U-bit
++### 3
++在做syscall上下文切换的时候，不需要切换地址空间
++### 4
++在用户态/内核态切换式需要切换，而单页表仅在切换内核线程时会涉及到更换地址空间
++
++# 荣誉准则
++在完成本次实验的过程（含此前学习的过程）中，我曾分别与 以下各位 就（与本次实验相关的）以下方面做过交流，还在代码中对应的位置以注释形式记录了具体的交流对象及内容：
++
++此外，我也参考了 以下资料 ，还在代码中对应的位置以注释形式记录了具体的参考来源及内容：
++
++3. 我独立完成了本次实验除以上方面之外的所有工作，包括代码与文档。 我清楚地知道，从以上方面获得的信息在一定程度上降低了实验难度，可能会影响起评分。
++
++4. 我从未使用过他人的代码，不管是原封不动地复制，还是经过了某些等价转换。 我未曾也不会向他人（含此后各届同学）复制或公开我的实验代码，我有义务妥善保管好它们。 我提交至本实验的评测系统的代码，均无意于破坏或妨碍任何计算机系统的正常运转。 我清楚地知道，以上情况均为本课程纪律所禁止，若违反，对应的实验成绩将按“-100”分计。

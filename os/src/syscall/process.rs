@@ -11,7 +11,6 @@ use crate::{
     },
     timer::get_time_us
 };
-use crate::task::TaskControlBlock;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -175,16 +174,12 @@ pub fn sys_spawn(path: *const u8) -> isize {
         current_task().unwrap().pid.0
     );
     let current_task = current_task().unwrap();
-    let mut inner  = current_task.inner_exclusive_access();
-    let path = translated_str(inner.memory_set.token(), path);
+    let token  = current_task.inner_exclusive_access().memory_set.token();
+    let path = translated_str(token, path);
     if let Some(elf_data) = get_app_data_by_name(path.as_str()){
-        trace!("debug-1");
-        let new_task = Arc::new(TaskControlBlock::new(elf_data));
-        trace!("debug-2");
-        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        let new_task = current_task.spawn(elf_data);
         let new_task_id = new_task.pid.0;
-        inner.children.push(new_task.clone());
-        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&current_task));
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
         trap_cx.x[10] = 0;
         add_task(new_task);
         new_task_id as _

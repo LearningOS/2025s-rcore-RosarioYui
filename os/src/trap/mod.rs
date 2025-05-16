@@ -104,6 +104,7 @@ pub fn trap_handler() -> ! {
         }
     }
     //println!("before trap_return");
+    enable_timer_interrupt();
     trap_return();
 }
 

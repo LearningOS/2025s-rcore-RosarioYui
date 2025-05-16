@@ -1,5 +1,5 @@
 //! Types related to task management & Functions for completely changing TCB
-use super::TaskContext;
+use super::{TaskContext};
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::{TRAP_CONTEXT_BASE, BIG_STRIDE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission, PTEFlags, PhysAddr};
@@ -9,6 +9,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 use crate::config::MAX_SYSCALL_ID;
+use core::cmp::Ordering;
 
 /// Task control block structure
 ///
@@ -36,6 +37,33 @@ impl TaskControlBlock {
         inner.memory_set.token()
     }
 }
+
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for TaskControlBlock {}
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let stride_a = self.inner.exclusive_access().get_stride();
+        let stride_b = other.inner.exclusive_access().get_stride();
+
+        (BIG_STRIDE>>1).cmp(&(stride_a.0.wrapping_sub(stride_b.0)))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Stride(u8);
 
 pub struct TaskControlBlockInner {
     /// The physical page number of the frame where the trap context is placed
@@ -74,10 +102,10 @@ pub struct TaskControlBlockInner {
     syscall_cnt:[usize;MAX_SYSCALL_ID],
 
     /// current running time
-    stride: usize,
+    stride: Stride,
 
     /// priority
-    pass: usize
+    pass: u8
 }
 
 impl TaskControlBlockInner {
@@ -95,7 +123,7 @@ impl TaskControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
-    pub fn get_stride(&self) -> usize {
+    fn get_stride(&self) -> Stride {
         self.stride
     }
 }
@@ -106,9 +134,7 @@ impl TaskControlBlock {
     /// At present, it is only used for the creation of initproc
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        trace!("debug-1");
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
-        trace!("debug-2");
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -134,8 +160,8 @@ impl TaskControlBlock {
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                     syscall_cnt: [0; MAX_SYSCALL_ID],
-                    stride: 0,
-                    pass: BIG_STRIDE / 16 // default priority is 16
+                    stride: Stride(0),
+                    pass: BIG_STRIDE >> 4 // default priority is 16
                 })
             },
         };
@@ -156,7 +182,7 @@ impl TaskControlBlock {
         let mut inner = self.inner_exclusive_access();
         if priority >= 2 {
             // overflow
-            inner.pass = BIG_STRIDE / priority as usize;
+            inner.pass = BIG_STRIDE / priority as u8;
             priority as isize
         } else{
             -1
@@ -166,7 +192,7 @@ impl TaskControlBlock {
     /// update current running time
     pub fn update_stride(&self){
         let mut inner = self.inner_exclusive_access();
-        inner.stride += inner.pass;
+        inner.stride.0 = inner.stride.0.wrapping_add(inner.pass);
     }
 
     /// Load a new elf to replace the original application address space and start execution
@@ -228,8 +254,8 @@ impl TaskControlBlock {
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
                     syscall_cnt: parent_inner.syscall_cnt,
-                    stride: 0,
-                    pass: BIG_STRIDE / 16
+                    stride: Stride(0),
+                    pass: BIG_STRIDE >> 4
                 })
             },
         });
@@ -243,6 +269,15 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// parent process spawn  the child process
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self>{
+        let new_task = Arc::new(TaskControlBlock::new(elf_data));
+        let mut parent_inner = self.inner_exclusive_access();
+        parent_inner.children.push(new_task.clone());
+        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&self));
+        new_task
     }
 
     /// get pid of process
