@@ -29,13 +29,14 @@ use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
+use crate::mm::{VirtAddr, MapPermission};
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use manager::add_task;
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
     Processor,
 };
+
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
@@ -119,4 +120,45 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// get &mut T by virtual addr in current memory set
+pub fn get_mut_ref<T>(vaddr:VirtAddr)-> Option<&'static mut T> {
+    current_task().unwrap().get_mut_ref(vaddr)
+}
+
+/// get &T by virtual addr in current memory set
+pub fn get_ref<T>(vaddr:VirtAddr)-> Option<&'static T> {
+    current_task().unwrap().get_ref(vaddr)
+}
+
+/// increment the syscall counter by 1
+pub fn inc_syscall(id:usize){
+    current_task().unwrap().inc_syscall(id);
+}
+
+/// get the syscall counter with specified id
+pub fn get_syscall_cnt(id:usize) -> usize{
+    current_task().unwrap().get_syscall_cnt(id)
+}
+
+/// clear current syscall counter
+pub fn clear_syscall(){
+    current_task().unwrap().clear_syscall();
+}
+
+/// map a framed area to current memory set
+pub fn map_frame(va: VirtAddr, ve: VirtAddr, perm:MapPermission) -> bool{
+    current_task().unwrap().map_frame(va, ve, perm)
+}
+
+/// map a or some framed area to current memory set
+pub fn unmap_frame(va: VirtAddr, ve: VirtAddr) -> bool{
+    current_task().unwrap().unmap_frame(va, ve)
+}
+
+/// show a virtual addr translation path used for debug
+#[allow(unused)]
+pub fn debug_vaddr(vaddr: VirtAddr){
+    current_task().unwrap().debug_vaddr(vaddr);
 }

@@ -54,11 +54,12 @@ mod process;
 
 use fs::*;
 use process::*;
-
+use crate::task::{inc_syscall, clear_syscall};
 use crate::fs::Stat;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
+    inc_syscall(syscall_id);
     match syscall_id {
         SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
@@ -67,7 +68,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
-        SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_EXIT => {
+            clear_syscall();
+            sys_exit(args[0] as i32)
+        },
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_FORK => sys_fork(),
