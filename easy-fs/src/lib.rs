@@ -8,6 +8,8 @@ mod block_dev;
 mod efs;
 mod layout;
 mod vfs;
+
+extern crate log;
 /// Use a block size of 512 bytes
 pub const BLOCK_SZ: usize = 512;
 use bitmap::Bitmap;

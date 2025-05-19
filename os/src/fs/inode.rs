@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use bitflags::*;
 use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
-
+use core::any::Any;
 /// inode in memory
 /// A wrapper around a filesystem inode
 /// to implement File trait atop
@@ -53,6 +53,13 @@ impl OSInode {
         }
         v
     }
+
+    /// return inside Inode pointer
+    pub fn inode(&self) ->  Arc<Inode> {
+        let inner = self.inner.exclusive_access();
+        inner.inode.clone()
+    }
+
 }
 
 lazy_static! {
@@ -60,6 +67,24 @@ lazy_static! {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
     };
+}
+
+/// count inode_id links
+pub fn inode_count(inode_id:u32) -> u32{
+    let (ret, _debug) = ROOT_INODE.inode_count(inode_id);
+    // for (name, inode_id) in debug {
+    //     println!("{} - {}", name, inode_id);
+    // }
+    ret
+}
+
+/// create strong link from old_inode_id's file to new_name's file
+pub fn create_link(old_inode_id: u32, new_name: &str) -> bool{
+    ROOT_INODE.create_link(new_name, old_inode_id)
+}
+/// remove strong link from name
+pub fn remove_link(name: &str) -> bool{
+    ROOT_INODE.remove_dir_entry(name)
 }
 
 /// List all apps in the root directory
@@ -156,4 +181,5 @@ impl File for OSInode {
         }
         total_write_size
     }
+    fn as_any(&self) -> &dyn Any { self }
 }

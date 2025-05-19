@@ -431,4 +431,8 @@ impl DirEntry {
     pub fn inode_id(&self) -> u32 {
         self.inode_id
     }
+    /// Update inode number of the entry
+    pub fn update_inode_id(&mut self, inode_id: u32) {
+        self.inode_id = inode_id;
+    }
 }
