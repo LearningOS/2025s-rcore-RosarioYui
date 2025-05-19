@@ -13,7 +13,6 @@ use alloc::vec::Vec;
 use bitflags::*;
 use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
-use core::any::Any;
 /// inode in memory
 /// A wrapper around a filesystem inode
 /// to implement File trait atop
@@ -181,5 +180,4 @@ impl File for OSInode {
         }
         total_write_size
     }
-    fn as_any(&self) -> &dyn Any { self }
 }
