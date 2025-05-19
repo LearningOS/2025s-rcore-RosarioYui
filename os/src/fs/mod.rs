@@ -16,6 +16,8 @@ pub trait File: Send + Sync + Any{
     fn read(&self, buf: UserBuffer) -> usize;
     /// write to the file from buf, return the number of bytes written
     fn write(&self, buf: UserBuffer) -> usize;
+    /// use for dynamic type check
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// The stat of a inode

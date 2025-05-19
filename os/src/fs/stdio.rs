@@ -1,5 +1,6 @@
 //!Stdin & Stdout
 
+use core::any::Any;
 use super::File;
 use crate::mm::UserBuffer;
 use crate::sbi::console_getchar;
@@ -40,6 +41,7 @@ impl File for Stdin {
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");
     }
+    fn as_any(&self) -> &dyn Any { self }
 }
 
 impl File for Stdout {
@@ -58,4 +60,5 @@ impl File for Stdout {
         }
         user_buf.len()
     }
+    fn as_any(&self) -> &dyn Any { self }
 }

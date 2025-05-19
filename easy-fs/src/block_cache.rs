@@ -138,7 +138,7 @@ pub fn get_block_cache(
 /// Sync all block cache to block device
 pub fn block_cache_sync_all() {
     let manager = BLOCK_CACHE_MANAGER.lock();
-    for (id, cache) in manager.queue.iter() {
+    for (_, cache) in manager.queue.iter() {
         cache.lock().sync();
     }
 }

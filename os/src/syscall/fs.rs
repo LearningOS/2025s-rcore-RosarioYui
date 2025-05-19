@@ -1,5 +1,5 @@
 //! File and filesystem-related syscalls
-use core::any::Any;
+
 use crate::fs::{open_file, OSInode, OpenFlags, Stat, StatMode, inode_count, create_link, remove_link};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
@@ -93,7 +93,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         return -1;
     }
     if let Some(fd_item) = &inner.fd_table[fd]{
-        if let Some(os_inode) = (fd_item as &dyn Any).downcast_ref::<OSInode>() {
+        if let Some(os_inode) = fd_item.as_any().downcast_ref::<OSInode>() {
             let k_st = translated_refmut(inner.get_user_token(), st);
             let tmp = os_inode.inode();
             let id = tmp.inode_id();
